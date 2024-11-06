@@ -1,0 +1,174 @@
+- name: Installer Nginx sur les instances HTTP
+  hosts: http  # Cible le groupe d'instances HTTP
+  become: yes
+  tasks:
+    - name: Mettre à jour les paquets
+      apt:
+        update_cache: yes
+
+    - name: Installer Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Démarrer Nginx
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Ouvrir le port 80 dans le pare-feu
+      ufw:
+        rule: allow
+        name: 'Nginx Full'
+
+    - name: Vérifier l'état de Nginx
+      command: systemctl status nginx
+      register: nginx_status
+      ignore_errors: yes
+
+    - name: Afficher le résultat de la vérification
+      debug:
+        var: nginx_status.stdout_lines
+
+    - name: Créer le répertoire /app
+      file:
+        path: /app
+        state: directory
+        mode: '0755'
+
+    - name: Créer index.php
+      copy:
+        dest: /app/index.php
+        content: |
+          <?php
+          phpinfo();
+          ?>
+
+    - name: Configurer Nginx pour utiliser PHP-FPM
+      copy:
+        dest: /etc/nginx/sites-available/default
+        content: |
+          server {
+              listen 80 default_server;
+              root /app;
+
+              index index.php index.html index.htm;
+
+              server_name _;
+
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+
+              location ~ \.php$ {
+                  include snippets/fastcgi-php.conf;
+                  fastcgi_pass 127.0.0.1:9000;
+              }
+
+              location ~ /\.ht {
+                  deny all;
+              }
+          }
+
+    - name: Lier la configuration par défaut de Nginx
+      command: nginx -s reload
+
+
+- name: Configure SCRIPT instance
+  hosts: script
+  become: yes
+  tasks:
+    - name: Update apt package index
+      apt:
+        update_cache: yes
+
+    - name: Install required packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: latest  # Utilise 'latest' pour forcer la mise à jour/réinstallation
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+      register: add_docker_repo
+
+    - name: Update apt package index after adding Docker repository
+      apt:
+        update_cache: yes
+      when: add_docker_repo.changed
+
+    - name: Check if Docker package is available
+      shell: apt-cache policy docker-ce | grep Candidate
+      register: docker_check
+      failed_when: docker_check.stdout == ""
+
+    - name: Install Docker
+      apt:
+        name: docker-ce
+        state: present
+
+    - name: Start Docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Install PHP 8.3 and required extensions
+      apt:
+        name:
+          - php8.3-cli
+          - php8.3-fpm
+          - php8.3-mysql
+          - php8.3-xml
+          - php8.3-mbstring
+          - php8.3-curl
+          - php8.3-zip
+        state: present
+
+    - name: Configure PHP-FPM to listen on TCP port 9000
+      lineinfile:
+        path: /etc/php/8.3/fpm/pool.d/www.conf
+        regexp: '^listen ='
+        line: 'listen = 127.0.0.1:9000'
+        state: present
+
+    - name: Set permissions for PHP-FPM configuration files
+      file:
+        path: /etc/php/8.3/fpm/pool.d/www.conf
+        mode: '0644'
+
+    - name: Set permissions for PHP-FPM main configuration file
+      file:
+        path: /etc/php/8.3/fpm/php-fpm.conf
+        mode: '0644'
+
+    - name: Restart PHP-FPM
+      service:
+        name: php8.3-fpm
+        state: restarted
+
+    - name: Pull PHP-FPM Docker image
+      docker_image:
+        name: php
+        tag: '8.3-fpm'
+        source: pull
+
+    - name: Create Docker container for PHP-FPM
+      docker_container:
+        name: script
+        image: php:8.3-fpm
+        volumes:
+          - /app:/var/www/html
+        ports:
+          - "9001:9000"
